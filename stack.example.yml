@@ -5,10 +5,10 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: pubky
-      POSTGRES_PASSWORD: ${PUBK…ORD}
+      POSTGRES_PASSWORD: ${PUBKY_DB_PASSWORD}
       POSTGRES_DB: pubky_homeserver
     volumes:
-      - pubky_postgres18:/var/lib/postgresql
+      - /mnt/pubky/postgres:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB || exit 1"]
       interval: 10s
@@ -31,6 +31,3 @@ services:
       - "127.0.0.1:6289:6289"
     volumes:
       - /mnt/pubky/data:/data
-
-volumes:
-  pubky_postgres18:

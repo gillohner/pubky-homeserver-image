@@ -12,35 +12,35 @@ Use a specific release tag in production. `latest` follows the newest image rele
 
 ## Quick Start
 
-Create a directory for the homeserver's persistent state, then start it with Postgres. `stack.example.yml` is a complete Compose/Portainer example:
+Create persistent directories, configure the database password, and start the stack:
 
 ```bash
-mkdir -p /srv/pubky/data /srv/pubky/postgres
-export PUBKY_DB_PASSWORD='use-a-long-random-password'
+mkdir -p /mnt/pubky/data /mnt/pubky/postgres
+cp .env.example .env
+editor .env
 docker compose -f stack.example.yml up -d
 ```
 
-The first start creates `/srv/pubky/data/config.toml` and `/srv/pubky/data/secret`. Stop the stack, edit `config.toml`, then start it again:
+Set `PUBKY_DB_PASSWORD` in `.env` to a long, random password. On v0.9.x, the first boot creates `/mnt/pubky/data/config.toml` and `/mnt/pubky/data/secret`; it may fail until the generated configuration is edited.
 
-```bash
-docker compose -f stack.example.yml down
-editor /srv/pubky/data/config.toml
-docker compose -f stack.example.yml up -d
-```
-
-At minimum, configure the database, public listeners, and DHT advertisement:
+Replace the generated `/mnt/pubky/data/config.toml` with this minimal working configuration. Replace both password placeholders and the public IP and hostname before restarting:
 
 ```toml
 [general]
-database_url = "postgres://pubky:YOUR_DATABASE_PASSWORD@pubky-db:5432/pubky_homeserver"
+database_url = "postgres://pubky:REPLACE_DB_PASSWORD@pubky-db:5432/pubky_homeserver"
+signup_mode = "token_required"
 
 [drive]
-icann_listen_socket = "0.0.0.0:6286"
 pubky_listen_socket = "0.0.0.0:6287"
+icann_listen_socket = "0.0.0.0:6286"
+
+[storage]
+type = "file_system"
 
 [admin]
+enabled = true
 listen_socket = "0.0.0.0:6288"
-admin_password = "use-a-long-random-password"
+admin_password = "REPLACE_ADMIN_PASSWORD"
 
 [metrics]
 enabled = true
@@ -48,7 +48,22 @@ listen_socket = "0.0.0.0:6289"
 
 [pkdns]
 public_ip = "YOUR_PUBLIC_IP"
+public_pubky_tls_port = 6287
 icann_domain = "homeserver.example.com"
+
+[logging]
+level = "info"
+```
+
+Restart the homeserver and verify each service:
+
+```bash
+docker compose -f stack.example.yml restart
+docker ps --format 'table {{.Names}}\t{{.Status}}'
+docker logs pubky-homeserver --tail 100
+curl -I http://127.0.0.1:6286
+curl -s http://127.0.0.1:6288/info -H 'X-Admin-Password: REPLACE_ADMIN_PASSWORD'
+curl -I http://127.0.0.1:6289/metrics
 ```
 
 Keep `secret`, `config.toml`, and the Postgres volume backed up. Losing the homeserver secret changes its identity.
