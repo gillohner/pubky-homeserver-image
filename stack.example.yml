@@ -1,0 +1,39 @@
+services:
+  pubky-db:
+    image: postgres:18
+    container_name: pubky-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pubky
+      POSTGRES_PASSWORD: ${PUBKY_DB_PASSWORD}
+      POSTGRES_DB: pubky_homeserver
+    volumes:
+      - /srv/pubky/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pubky -d pubky_homeserver"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - pubky
+
+  pubky:
+    image: ghcr.io/gillohner/pubky-homeserver:v0.9.3
+    container_name: pubky-homeserver
+    restart: unless-stopped
+    depends_on:
+      pubky-db:
+        condition: service_healthy
+    ports:
+      - "6286:6286"
+      - "6287:6287"
+      - "127.0.0.1:6288:6288"
+      - "127.0.0.1:6289:6289"
+    volumes:
+      - /srv/pubky/data:/data
+    networks:
+      - pubky
+
+networks:
+  pubky:
+    driver: bridge

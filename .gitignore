@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+
+.pubky/
+data/
+config.toml
+secrets/
+
+*.log
+*.sql
+*.dump
+*.tar
+*.tar.gz
