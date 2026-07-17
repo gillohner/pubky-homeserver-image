@@ -5,17 +5,16 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: pubky
-      POSTGRES_PASSWORD: ${PUBKY_DB_PASSWORD}
+      POSTGRES_PASSWORD: ${PUBK…ORD}
       POSTGRES_DB: pubky_homeserver
     volumes:
-      - /srv/pubky/postgres:/var/lib/postgresql/data
+      - pubky_postgres18:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pubky -d pubky_homeserver"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 10
-    networks:
-      - pubky
+      retries: 30
+      start_period: 60s
 
   pubky:
     image: ghcr.io/gillohner/pubky-homeserver:v0.9.3
@@ -24,16 +23,14 @@ services:
     depends_on:
       pubky-db:
         condition: service_healthy
+    command: ["--data-dir", "/data"]
     ports:
       - "6286:6286"
       - "6287:6287"
       - "127.0.0.1:6288:6288"
       - "127.0.0.1:6289:6289"
     volumes:
-      - /srv/pubky/data:/data
-    networks:
-      - pubky
+      - /mnt/pubky/data:/data
 
-networks:
-  pubky:
-    driver: bridge
+volumes:
+  pubky_postgres18:
