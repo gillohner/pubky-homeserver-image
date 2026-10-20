@@ -1,33 +1,122 @@
+# Pubky homeserver + admin dashboard, adapted from the Umbrel app:
+# https://github.com/pubky/umbrel-app-store/tree/master/pubky-homeserver
+#
+# Differences from Umbrel:
+# - No app_proxy or cloudflared services: put your own reverse proxy (TLS) in
+#   front of 6286 and forward TCP 6287 straight to this host.
+# - Passwords come from the stack environment (.env / Portainer env) instead
+#   of Umbrel's APP_PASSWORD.
+# - The dashboard runs in standalone mode (PLATFORM unset) with its own login.
+#
+# Required env: PUBKY_DB_PASSWORD, PUBKY_ADMIN_PASSWORD, PUBKY_DOMAIN,
+# PUBKY_PUBLIC_IP. Optional: PUBKY_DATA_DIR, PUBKY_BIND_IP, PUBKY_DASHBOARD_PORT.
+
 services:
-  pubky-db:
-    image: postgres:18
-    container_name: pubky-db
+  postgres:
+    image: postgres:18@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
     restart: unless-stopped
+    stop_grace_period: 1m
     environment:
       POSTGRES_USER: pubky
-      POSTGRES_PASSWORD: ${PUBKY_DB_PASSWORD}
+      POSTGRES_PASSWORD: ${PUBKY_DB_PASSWORD:?PUBKY_DB_PASSWORD is required}
       POSTGRES_DB: pubky_homeserver
     volumes:
-      - /mnt/pubky/postgres:/var/lib/postgresql
+      # postgres:18 keeps its data under /var/lib/postgresql/18/docker.
+      - ${PUBKY_DATA_DIR:-/mnt/pubky}/postgres:/var/lib/postgresql
+    networks:
+      default:
+        # Older configs written by the previous stack point at pubky-db.
+        aliases: [pubky-db]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB || exit 1"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U pubky -d pubky_homeserver"]
       interval: 10s
       timeout: 5s
       retries: 30
       start_period: 60s
 
-  pubky:
-    image: ghcr.io/gillohner/pubky-homeserver:v0.9.3
-    container_name: pubky-homeserver
-    restart: unless-stopped
-    depends_on:
-      pubky-db:
-        condition: service_healthy
-    command: ["--data-dir", "/data"]
-    ports:
-      - "6286:6286"
-      - "6287:6287"
-      - "127.0.0.1:6288:6288"
-      - "127.0.0.1:6289:6289"
+  # One-shot: renders /data/config.toml on first boot (never overwrites an
+  # existing file) and reconciles admin_password with the env on every start.
+  homeserver-config-wrapper:
+    image: synonymsoft/homeserver-umbrel-config-wrapper:v0.0.8@sha256:23d2ba85fa07e61a9d87550179910d85a03cd49b6532b62c584d9b4e8ba2eb14
+    restart: on-failure
+    environment:
+      POSTGRES_USER: pubky
+      POSTGRES_PASSWORD: ${PUBKY_DB_PASSWORD}
+      ADMIN_PASSWORD: ${PUBKY_ADMIN_PASSWORD:?PUBKY_ADMIN_PASSWORD is required}
+      ICANN_DOMAIN: ${PUBKY_DOMAIN:?PUBKY_DOMAIN is required}
+      PUBLIC_IP: ${PUBKY_PUBLIC_IP:?PUBKY_PUBLIC_IP is required}
     volumes:
-      - /mnt/pubky/data:/data
+      - ${PUBKY_DATA_DIR:-/mnt/pubky}/data:/data
+
+  homeserver:
+    image: synonymsoft/homeserver:v0.16.2@sha256:b357fecec481a37c8af40a7ed70562871a587ecb5bfd251a6e95330f1e61c7df
+    restart: unless-stopped
+    stop_grace_period: 1m
+    # Same log tee as the Umbrel app (feeds the dashboard Logs tab), plus:
+    # behind a TLS reverse proxy the public HTTP port is 443, not the bound
+    # 6286, so make sure the published PKARR record says so.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        CONFIG=/data/config.toml
+        if ! grep -q '^public_icann_http_port[[:space:]]*=' "$$CONFIG"; then
+          sed -i '/^icann_domain[[:space:]]*=/a public_icann_http_port = 443' "$$CONFIG"
+        fi
+        MAX=10485760
+        KEEP=2097152
+        if [ -f /data/homeserver.log ] && [ "$$(wc -c < /data/homeserver.log)" -gt "$$MAX" ]; then
+          tail -c "$$KEEP" /data/homeserver.log > /data/homeserver.log.tmp
+          mv /data/homeserver.log.tmp /data/homeserver.log
+        fi
+        rm -f /tmp/log-fifo
+        mkfifo /tmp/log-fifo
+        tee -a /data/homeserver.log < /tmp/log-fifo &
+        exec homeserver --data-dir /data > /tmp/log-fifo 2>&1
+    volumes:
+      - ${PUBKY_DATA_DIR:-/mnt/pubky}/data:/data
+    ports:
+      # ICANN HTTP: target for the TLS reverse proxy only.
+      - "${PUBKY_BIND_IP:-0.0.0.0}:6286:6286"
+      # Pubky TLS: forward this TCP port from the internet.
+      - "6287:6287"
+      # Admin API: loopback only (pubky-cli / homeservercli on the host).
+      - "127.0.0.1:6288:6288"
+      # 6289 (metrics, unauthenticated) stays on the container network.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      homeserver-config-wrapper:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6288 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+
+  dashboard:
+    image: synonymsoft/homeserver-dashboard:v0.1.32@sha256:416da0438af1246b35aeb1f7ec2520e29791e0479b46e78d64fe3cfe151e5d05
+    restart: unless-stopped
+    stop_grace_period: 1m
+    # Root only for the entrypoint's permission phase; it drops to nextjs.
+    user: "0:0"
+    volumes:
+      - ${PUBKY_DATA_DIR:-/mnt/pubky}/data:/app/homeserver-data
+    environment:
+      ADMIN_BASE_URL: http://homeserver:6288
+      CLIENT_BASE_URL: http://homeserver:6286
+      METRICS_BASE_URL: http://homeserver:6289
+      ADMIN_TOKEN: ${PUBKY_ADMIN_PASSWORD}
+      # The wrapper rewrites admin_password from the env on every boot, so
+      # editing it in the dashboard would only disconnect the dashboard.
+      ADMIN_PASSWORD_MANAGED: "true"
+      DASHBOARD_PASSWORD: ${PUBKY_DASHBOARD_PASSWORD:-${PUBKY_ADMIN_PASSWORD}}
+      HOMESERVER_LOG_PATH: /app/homeserver-data/homeserver.log
+      PORT: 8812
+      HOSTNAME: "0.0.0.0"
+    ports:
+      - "${PUBKY_BIND_IP:-0.0.0.0}:${PUBKY_DASHBOARD_PORT:-8812}:8812"
+    depends_on:
+      homeserver:
+        condition: service_healthy
