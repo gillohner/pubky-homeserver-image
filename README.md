@@ -12,78 +12,51 @@ Use a specific release tag in production. `latest` follows the newest image rele
 
 ## Quick Start
 
-Create persistent directories, configure the database password, and start the stack:
+`stack.example.yml` runs a homeserver with the official admin dashboard. It is adapted from the [Pubky Umbrel app](https://github.com/pubky/umbrel-app-store/tree/master/pubky-homeserver) and uses the upstream `synonymsoft/*` images, pinned by digest:
+
+| Service | Image | Role |
+| --- | --- | --- |
+| `postgres` | `postgres:18` | Homeserver database |
+| `homeserver-config-wrapper` | `synonymsoft/homeserver-umbrel-config-wrapper` | One-shot: writes `config.toml` on first boot and syncs `admin_password` from the env |
+| `homeserver` | `synonymsoft/homeserver` | The homeserver; stdout is tee'd to `homeserver.log` for the dashboard |
+| `dashboard` | `synonymsoft/homeserver-dashboard` | Admin UI on port 8812 (users, invites with Pubky Ring QR, files, logs, config) |
+
+The Umbrel-only pieces (`app_proxy`, the Cloudflare tunnel containers) are left out: bring your own reverse proxy.
 
 ```bash
 mkdir -p /mnt/pubky/data /mnt/pubky/postgres
 cp .env.example .env
 editor .env
-docker compose -f stack.example.yml up -d
+docker compose -f stack.example.yml --env-file .env up -d
 ```
 
-Set `PUBKY_DB_PASSWORD` in `.env` to a long, random password. On v0.9.x, the first boot creates `/mnt/pubky/data/config.toml` and `/mnt/pubky/data/secret`; it may fail until the generated configuration is edited.
+On first boot the wrapper generates `/mnt/pubky/data/config.toml` (token-required signups, admin and metrics enabled, `icann_domain` = `PUBKY_DOMAIN`, `public_ip` = `PUBKY_PUBLIC_IP`), and the homeserver creates its `secret`. An existing `config.toml` is never overwritten: only `admin_password` is reconciled with the env, and `public_icann_http_port = 443` is added if missing. The database service also answers as `pubky-db`, so configs from the previous version of this stack keep working.
 
-Replace the generated `/mnt/pubky/data/config.toml` with this minimal working configuration. Replace both password placeholders and the public IP and hostname before restarting:
-
-```toml
-[general]
-database_url = "postgres://pubky:REPLACE_DB_PASSWORD@pubky-db:5432/pubky_homeserver"
-signup_mode = "token_required"
-
-[drive]
-pubky_listen_socket = "0.0.0.0:6287"
-icann_listen_socket = "0.0.0.0:6286"
-
-[storage]
-type = "file_system"
-
-[admin]
-enabled = true
-listen_socket = "0.0.0.0:6288"
-admin_password = "REPLACE_ADMIN_PASSWORD"
-
-[metrics]
-enabled = true
-listen_socket = "0.0.0.0:6289"
-
-[pkdns]
-public_ip = "YOUR_PUBLIC_IP"
-public_pubky_tls_port = 6287
-icann_domain = "homeserver.example.com"
-
-[logging]
-level = "info"
-```
-
-Restart the homeserver and verify each service:
+Open the dashboard at `http://<host>:8812` and log in with `PUBKY_ADMIN_PASSWORD` (or `PUBKY_DASHBOARD_PASSWORD`). Then check the homeserver:
 
 ```bash
-docker compose -f stack.example.yml restart
-docker ps --format 'table {{.Names}}\t{{.Status}}'
-docker logs pubky-homeserver --tail 100
-curl -I http://127.0.0.1:6286
-curl -s http://127.0.0.1:6288/info -H 'X-Admin-Password: REPLACE_ADMIN_PASSWORD'
-curl -I http://127.0.0.1:6289/metrics
+docker compose -f stack.example.yml logs homeserver --tail 100
+curl -s http://127.0.0.1:6288/info -H "X-Admin-Password: $PUBKY_ADMIN_PASSWORD"
+curl -I https://homeserver.example.com
 ```
 
-Keep `secret`, `config.toml`, and the Postgres volume backed up. Losing the homeserver secret changes its identity.
+Keep `secret`, `config.toml`, and the Postgres directory backed up. Losing the homeserver secret changes its identity.
 
 ## Networking
 
-The container listens on these ports when configured as above:
-
 | Port | Purpose | Exposure |
 | --- | --- | --- |
-| 6286 | ICANN HTTP | Reverse proxy with TLS on a public hostname |
-| 6287 | Pubky TLS | Public TCP |
-| 6288 | Admin API | Keep private |
-| 6289 | Prometheus metrics | Keep private |
+| 6286 | ICANN HTTP | Reverse proxy with TLS on `PUBKY_DOMAIN` (443) |
+| 6287 | Pubky TLS | Public TCP, forwarded from `PUBKY_PUBLIC_IP` |
+| 6288 | Admin API | Host loopback only |
+| 6289 | Prometheus metrics | Container network only |
+| 8812 | Dashboard | LAN or VPN; never expose without the login set |
 
-For a split-host deployment, forward HTTPS traffic from the reverse proxy to port 6286 and TCP traffic to port 6287. Do not expose the admin or metrics endpoints to the internet.
+Preserve upstream `Cache-Control` and `Vary` headers in the reverse proxy. Use a static public IP: the PKARR record embeds it.
 
 ## Configuration and Upgrades
 
-The image defaults to `pubky-homeserver --data-dir /data`; mount persistent storage at `/data`. The binary creates its default configuration and secret there when they are absent. See the [upstream sample configuration](https://github.com/pubky/pubky-core/blob/main/pubky-homeserver/config.sample.toml) for every option.
+This repository's own image (`ghcr.io/gillohner/pubky-homeserver`) defaults to `pubky-homeserver --data-dir /data`; mount persistent storage at `/data`. The binary creates its default configuration and secret there when they are absent. See the [upstream sample configuration](https://github.com/pubky/pubky-core/blob/main/pubky-homeserver/config.sample.toml) for every option.
 
 Before upgrading, back up `/data` and Postgres, review the upstream release notes, change the image tag, and recreate the container. Never put real credentials, configuration, secrets, or database dumps in this repository.
 
